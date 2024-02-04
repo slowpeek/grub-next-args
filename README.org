@@ -1,0 +1,8 @@
+These scripts implement /extra kernel args for one boot/ feature similar to the
+stock /default entry for one boot/ one. Both rely on a var from grubenv.
+
+For more details and installation instructions look into the /README/ section in
+=update-grub=.
+
+It was made mainly for backing up headless/remote servers with help of
+=overlayroot=.

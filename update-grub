@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+
+# MIT license (c) 2024 https://github.com/slowpeek
+# Homepage: https://github.com/slowpeek/grub-next-args
+
+: <<'README'
+
+ONLY TESTED ON DEBIAN AND UBUNTU
+
+Install:
+
+1. Divert the original tool: dpkg-divert --rename /usr/sbin/update-grub
+2. Save this script as /usr/sbin/update-grub
+3. Run 'update-grub'
+4. Put grub-next-args into /usr/sbin
+
+Uninstall:
+
+1. Clean up any next_args value: grub-next-args -u
+2. Remove /usr/sbin/grub-next-args
+3. Remove /usr/sbin/update-grub
+4. Undo the diversion: dpkg-divert --rename --remove /usr/sbin/update-grub
+5. Run 'update-grub'
+
+--
+
+Stock grub.cfg uses 'next_entry' var from grubenv to implement the "default
+entry for one boot" feature. grub-reboot tool (based on grub-editenv) can be
+used to manage the var.
+
+This script makes changes to the stock grub.cfg to support "extra kernel args
+for one boot" feature, it relies on 'next_args' var from grubenv for that. The
+extra args are appended to all 'linux ..'  lines inside the '10_linux'
+block. The companion tool to manage the var is grub-next-args (based on
+grub-editenv again).
+
+BOTH FEATURES ONLY WORK AS SUPPOSED WHEN GRUB CAN WRITE TO THE GRUBENV
+FILE. OTHERWISE (RAID/LVM) THE VARS STILL KEEP THEIR VALUES ON SUBSEQUENT
+REBOOTS
+
+README
+
+set -eu
+
+say2() {
+    printf '%s\n' "$1" >&2
+}
+
+bye() {
+    say2 "$1"
+    exit 1
+}
+
+injector() {
+    local linux_ca_injected=n mod_linux=n
+    local line w sect sect_st
+
+    while IFS= read -r line; do
+        if [[ $mod_linux == y ]]; then
+            read -r w _ <<< "$line"
+
+            if [[ $w == linux ]]; then
+                line=${line/linux/linux_ca}
+            fi
+        fi
+
+        printf '%s\n' "$line"
+
+        if [[ $line == '### '@(BEGIN|END)' '* ]]; then
+            read -r _ sect_st sect _ <<< "$line"
+
+            sect_st=${sect_st,,}
+            sect=${sect##*/}
+
+            if [[ $sect == 00_header && $sect_st == end ]]; then
+                linux_ca_injected=y
+
+                cat <<'EOF'
+
+### BEGIN next-args ###
+custom_args=
+
+if [ "${next_args}" ] ; then
+    custom_args="${next_args}"
+    set next_args=
+    save_env next_args
+fi
+
+function linux_ca {
+    linux "$@" $custom_args
+}
+### END next-args ###
+EOF
+
+            elif [[ $sect == 10_linux ]]; then
+                if [[ $linux_ca_injected == y ]]; then
+                    [[ $sect_st == begin ]] && mod_linux=y || mod_linux=n
+                fi
+            fi
+        fi
+    done
+}
+
+## --
+
+main() {
+    update-grub.distrib "$@"
+
+    say2 'Injecting the next-args mod ...'
+
+    local cfg=/boot/grub/grub.cfg
+    local cfg1=${cfg}.na
+
+    injector < "$cfg" > "$cfg1"
+
+    if ! grub-script-check "$cfg1"; then
+        rm "$cfg1"
+        bye 'The injector resulted in a syntax error. The original grub.cfg is left intact'
+    fi
+
+    cat "$cfg1" > "$cfg"
+    rm "$cfg1"
+
+    say2 'done'
+}
+
+[[ ! ${BASH_SOURCE[0]} == "$0" ]] || main "$@"

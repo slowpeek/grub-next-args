@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+
+# MIT license (c) 2024 https://github.com/slowpeek
+# Homepage: https://github.com/slowpeek/grub-next-args
+
+# A wrapper around grub-editenv to manage next_args var.
+
+set -eu
+
+SCRIPT_SELF=${BASH_SOURCE[0]##*/}
+
+if [[ -t 1 ]]; then
+    t_red=$'\e[31m'
+    t_reset=$'\e(B\e[m'
+else
+    t_red=
+    t_reset=
+fi
+
+bye() {
+    echo "${t_red}error:${t_reset}" "$1"
+    exit 1
+}
+
+# --
+
+check_root() {
+    (( ! EUID )) || bye 'This action requires root permissions, run with sudo'
+}
+
+usage() {
+    cat <<EOF
+This tool can be used to manage next_args var in the grubenv file.
+
+Usage: ${SCRIPT_SELF} [action] [options]
+
+Actions:
+  -h, --help                 Show help
+  -q, --query                Show current next_args value
+  -u, --unset                Unset next_args
+  -s, --set 'arg1 arg2 ..'   Set next_args
+
+Without any action set, -h is assumed.
+
+Options:
+  -f, --file path            Custom path for grubenv (default: /boot/grub/grubenv)
+  --no-probe                 Do not check the device with grub-probe
+
+Homepage https://github.com/slowpeek/grub-next-args
+EOF
+
+    exit
+}
+
+set_action() {
+    [[ -z $action || ${action:0:1} == "${1:0:1}" ]] ||
+        bye "-$1 and -${action:0:1} are mutually exclusive"
+
+    action="$1"
+}
+
+# --
+
+main() {
+    local opts
+    # jetopt ffile: hhelp .no-probe qquery sset: uunset
+    opts=$(getopt -o f:hqs:u -l file:,help,no-probe,query,set:,unset -- "$@") || exit
+    eval set -- "$opts"
+
+    local grubenv=/boot/grub/grubenv probe=y action=
+    while (( $# )); do
+        case $1 in
+            -f|--file)
+                grubenv=$2
+                shift 2 ;;
+
+            -h|--help)
+                set_action h
+                shift ;;
+
+            --no-probe)
+                probe=n
+                shift ;;
+
+            -q|--query)
+                set_action q
+                shift ;;
+
+            -s|--set)
+                set_action "s=$2"
+                shift 2 ;;
+
+            -u|--unset)
+                set_action u
+                shift ;;
+
+            --)
+                shift
+                break ;;
+        esac
+    done
+
+    (( ! $# )) || bye 'This tool does not accept any non-option args'
+    [[ -n $action ]] || action=h
+
+    # --
+
+    [[ ! $action == h ]] || usage
+
+    local dir
+    dir=$(dirname "$grubenv")
+    [[ -d $dir ]] || bye "There is no such dir: ${dir}"
+
+    case $action in
+        q)
+            if [[ -f "$grubenv" ]]; then
+                [[ -r "$grubenv" ]] || check_root
+                grub-editenv "$grubenv" list | grep '^next_args='
+            fi ;;
+
+        s=*)
+            local args=${action#*=}
+
+            # In the injected grub script code we pass the custom args var to
+            # the 'linux' command unquoted, so multiple space-separated args are
+            # treated as such. Dealing with quoted values with spaces inside is
+            # too much to ask from this tool.
+            [[ ! $args == *[\'\"]* ]] ||
+                bye 'Quotes in kernel args are not supported here'
+
+            if [[ $probe == y ]]; then
+                check_root
+
+                local magic
+                magic=$(grub-probe -t abstraction -- "$dir")
+
+                # On boot grub should be able to reset values in grubenv,
+                # otherwise on a subsequent reboot it would still apply the same
+                # custom args. Here we check if the device grubenv dwells on is
+                # writable by grub. grub-reboot does such check as well but it
+                # only issues a warning in the bad case. Here we treat it as a
+                # fatal error.
+                [[ -z $magic ]] || bye 'Grub cant write to lvm/raid'
+            fi
+
+            if [[ -f "$grubenv" ]]; then
+                [[ -w "$grubenv" ]] || check_root
+            else
+                [[ -w "$dir" ]] || check_root
+            fi
+
+            grub-editenv "$grubenv" set next_args="$args" ;;
+
+        u)
+            if [[ -f "$grubenv" ]]; then
+                [[ -w "$grubenv" ]] || check_root
+                grub-editenv "$grubenv" unset next_args
+            fi ;;
+    esac
+}
+
+[[ ! ${BASH_SOURCE[0]} == "$0" ]] || main "$@"
